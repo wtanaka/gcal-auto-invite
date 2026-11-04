@@ -1,0 +1,12 @@
+{
+  "printWidth": 80,
+  "overrides": [
+    {
+      "files": "*.gs",
+      "options": {
+        "parser": "babel"
+      }
+    }
+  ],
+  "proseWrap": "always"
+}

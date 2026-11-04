@@ -1,0 +1,8 @@
+.clasp.json
+.clasprc.json
+node_modules
+# Per-account config holds real addresses and script IDs; only the example is tracked.
+accounts/*
+!accounts/example
+!accounts/example/**
+.DS_Store

@@ -1,0 +1,19 @@
+{
+  "name": "gcal-auto-invite",
+  "version": "1.0.0",
+  "description": "Apps Script that adds extra attendees to upcoming events",
+  "private": true,
+  "license": "MIT",
+  "scripts": {
+    "gas": "node scripts/gas.mjs",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
+  },
+  "devDependencies": {
+    "@google/clasp": "3.4.1",
+    "prettier": "3.9.10"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
