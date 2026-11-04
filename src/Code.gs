@@ -3,94 +3,58 @@
 //
 // Requires the Google Calendar advanced service (see appsscript.json).
 //
-// CONFIG (me, invitees, optionally everyHours) comes from Config.gs, which the
-// CLI generates from accounts/<name>/config.json; see the README. Run
+// CONFIG (invitees, plus any overrides of DEFAULTS) comes from Config.gs, which
+// the CLI generates from accounts/<name>/config.json; see the README. Run
 // installTrigger() once from the editor to grant access and schedule
 // addOtherEmailInvites().
 
 var DEFAULTS = {
   // How often installTrigger() schedules a run: 1, 2, 4, 6, 8 or 12 hours.
   everyHours: 4,
+  // How far ahead to look for events that need the invitees added.
+  lookaheadDays: 90,
+  // Whether Google emails the invitees about the change: "none", "all" or
+  // "externalOnly".
+  sendUpdates: "none",
 };
 
 function getConfig() {
   return Object.assign({}, DEFAULTS, CONFIG);
 }
 
-function getMyResponse(event) {
-  if (event && event.attendees && event.attendees.length > 0) {
-    var theMeAttendees = event.attendees.filter(
-      (attendee) => attendee.email === getConfig().me,
-    );
-    if (theMeAttendees.length) {
-      return theMeAttendees[0].responseStatus;
+function normalizeEmail(email) {
+  return String(email || "").toLowerCase();
+}
+
+// Lists every event between timeMin and timeMax, following result pages.
+function listEvents(calendarId, timeMin, timeMax) {
+  var events = [];
+  var pageToken;
+  do {
+    var args = {
+      singleEvents: true,
+      timeMin: timeMin.toISOString(),
+      timeMax: timeMax.toISOString(),
+      orderBy: "startTime",
+      maxResults: 250,
+    };
+    if (pageToken) {
+      args.pageToken = pageToken;
     }
-  }
-  return "NOT APPLICABLE";
-}
-
-function getMaxStart(events) {
-  var maxStart = events
-    .map((event) => event["xParsedStart"])
-    // All-day events have no dateTime and parse to NaN.
-    .filter((startTimestamp) => !isNaN(startTimestamp))
-    .reduce((a, b) => Math.max(a, b), -1);
-  return maxStart;
-}
-
-function getEvents(calendarId, now) {
-  const MAX_RESULTS = 250;
-  var result = Calendar.Events.list(calendarId, {
-    singleEvents: true,
-    timeMin: now.toISOString(),
-    orderBy: "startTime",
-    maxResults: MAX_RESULTS,
-  });
-  console.log(
-    "Query for events starting at " +
-      now +
-      " returned " +
-      result["items"].length +
-      " items",
-  );
-
-  var events = Object.entries(result["items"])
-    // items are arrays that look like [arrayIdx, item] so we get the item
-    .map((entry) => entry[1])
-    // Enhance with parsed start date, end date, and invite response
-    .map((event) =>
-      Object.assign(
-        {
-          xParsedStart: Date.parse(event["start"]["dateTime"]),
-          xParsedEnd: Date.parse(event["end"]["dateTime"]),
-          xMyResponse: getMyResponse(event),
-        },
-        event,
-      ),
-    );
-
-  if (result["items"].length == MAX_RESULTS) {
-    // Ignore events after the max start date, because we may not have all
-    // events with that same start date.
-    var maxStart = getMaxStart(events);
-    console.log("maxStart is ", maxStart);
-    events = events.filter((event) => event["xParsedStart"] != maxStart);
-    console.log(
-      "After truncating events on " +
-        new Date(maxStart) +
-        ", there are " +
-        events.length +
-        " left",
-    );
-  } else {
-    console.log(
-      "No need to truncate because original query returned less than " +
-        MAX_RESULTS +
-        " results",
-    );
-  }
-
+    var result = Calendar.Events.list(calendarId, args);
+    events = events.concat(result.items || []);
+    pageToken = result.nextPageToken;
+  } while (pageToken);
+  console.log("Found " + events.length + " events from " + timeMin);
   return events;
+}
+
+// The invitees that are not yet attendees of the event (case-insensitive).
+function getMissingInvitees(inviteeEmails, event) {
+  var existing = (event.attendees || []).map((a) => normalizeEmail(a.email));
+  return inviteeEmails.filter(
+    (email) => !existing.includes(normalizeEmail(email)),
+  );
 }
 
 function filterToEventsMissingInvitee(inviteeEmails, events) {
@@ -99,66 +63,77 @@ function filterToEventsMissingInvitee(inviteeEmails, events) {
     if (event.eventType && event.eventType !== "default") {
       return false;
     } else if (!event.attendees) {
-      console.log("this event has no attendees", event);
       return true;
     } else if (event.attendees.length == 0) {
-      console.log("this event has empty attendee list", event);
       return false;
     } else {
-      const existingEmails = event.attendees.map((att) => att.email);
-      // Returns true if at least one required email is not in the attendee list
-      return inviteeEmails.some((email) => !existingEmails.includes(email));
+      return getMissingInvitees(inviteeEmails, event).length > 0;
     }
   });
 }
 
-function addInvitee(calendarId, inviteeEmails, events) {
+// Adds the missing invitees to each event. One event failing (for example one
+// you are not allowed to modify) does not stop the rest. Returns the failures.
+function addInvitee(calendarId, inviteeEmails, events, sendUpdates) {
+  var failures = [];
   events.forEach((event) => {
-    var existingAttendees = event.attendees || [];
-    var existingEmails = existingAttendees.map((a) => a.email);
-
-    // Identify which emails from our list are not yet present
-    var missingEmails = inviteeEmails.filter(
-      (email) => !existingEmails.includes(email),
+    var missingEmails = getMissingInvitees(inviteeEmails, event);
+    if (missingEmails.length == 0) {
+      return;
+    }
+    console.log("adding " + missingEmails.join(", ") + " to " + event.summary);
+    var newAttendees = (event.attendees || []).concat(
+      missingEmails.map((email) => ({ email: email })),
     );
-
-    if (missingEmails.length > 0) {
-      console.log(
-        "adding " + missingEmails.join(", ") + " to " + event.summary,
-      );
-
-      // Map missing strings to attendee objects and combine with existing list
-      var newAttendees = existingAttendees.concat(
-        missingEmails.map((email) => ({ email: email })),
-      );
-
-      Calendar.Events.patch(
-        {
-          attendees: newAttendees,
-        },
-        calendarId,
-        event.id,
-      );
+    try {
+      Calendar.Events.patch({ attendees: newAttendees }, calendarId, event.id, {
+        sendUpdates: sendUpdates,
+      });
+    } catch (e) {
+      console.error("could not update " + event.summary + ": " + e);
+      failures.push({ id: event.id, summary: event.summary, error: String(e) });
     }
   });
+  return failures;
 }
 
 function addOtherEmailInvites() {
-  var calendarId = "primary";
-  var queryMinDate = new Date();
-  var sourceEvents = getEvents(calendarId, queryMinDate);
-
-  var eventsMissingInvitee = filterToEventsMissingInvitee(
-    getConfig().invitees,
-    sourceEvents,
-  );
-  addInvitee(calendarId, getConfig().invitees, eventsMissingInvitee);
+  // Skip this run if the previous one is still going.
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(10000)) {
+    console.log("Another run is in progress; skipping");
+    return;
+  }
+  try {
+    var config = getConfig();
+    var calendarId = "primary";
+    var now = new Date();
+    var until = new Date(now.getTime() + config.lookaheadDays * 86400000);
+    var events = listEvents(calendarId, now, until);
+    var failures = addInvitee(
+      calendarId,
+      config.invitees,
+      filterToEventsMissingInvitee(config.invitees, events),
+      config.sendUpdates,
+    );
+    if (failures.length > 0) {
+      // Fail the run so Apps Script reports it, after trying every event.
+      throw new Error(
+        failures.length +
+          " event(s) could not be updated: " +
+          failures.map((f) => f.summary + " (" + f.error + ")").join("; "),
+      );
+    }
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 // Run once from the editor: replaces any existing trigger for
-// addOtherEmailInvites() with one that runs every getConfig().everyHours hours.
+// addOtherEmailInvites() with one that runs every `everyHours` hours.
 // Safe to run again after changing the interval.
 function installTrigger() {
+  var hours = getConfig().everyHours;
   ScriptApp.getProjectTriggers()
     .filter(
       (trigger) => trigger.getHandlerFunction() === "addOtherEmailInvites",
@@ -166,9 +141,7 @@ function installTrigger() {
     .forEach((trigger) => ScriptApp.deleteTrigger(trigger));
   ScriptApp.newTrigger("addOtherEmailInvites")
     .timeBased()
-    .everyHours(getConfig().everyHours)
+    .everyHours(hours)
     .create();
-  console.log(
-    "Installed trigger: every " + getConfig().everyHours + " hour(s)",
-  );
+  console.log("Installed trigger: every " + hours + " hour(s)");
 }

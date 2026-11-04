@@ -6,14 +6,19 @@ calendar to a second address.
 
 ## Behavior
 
-- Looks at events on your primary calendar from now onward (up to 250 per run;
-  if the page is full, the last start time is dropped so no event is half-seen).
+- Looks at events on your primary calendar from now until `lookaheadDays` days
+  ahead (default 90), following every page of results.
 - Only touches regular events (`eventType` of `default`); birthdays,
   Gmail-derived events, focus time and similar are skipped.
 - Skips events whose attendee list exists but is empty.
-- Patches in only the addresses that are missing, keeping existing attendees.
+- Patches in only the addresses that are missing (compared case-insensitively),
+  keeping existing attendees.
+- If an event cannot be updated (for example one you may not modify), the run
+  carries on with the rest and then fails, so Apps Script reports it.
+- Overlapping runs are skipped.
 
-Note: adding attendees makes Google send them invitations.
+By default Google does not email the invitees about the change (`sendUpdates` is
+`"none"`); set it to `"all"` to send invitations.
 
 ## Setup
 
@@ -34,15 +39,15 @@ the name `work`; any name works, including an email address.
 
    ```json
    {
-     "me": "you@example.com",
      "invitees": ["other@example.org"],
      "title": "gcal-auto-invite"
    }
    ```
 
-   `me` is your own address and `invitees` are the addresses to add to your
-   events. Optionally add `"everyHours"` to change how often it runs; the
-   default and allowed values are in `src/Code.gs`.
+   `invitees` are the addresses to add to your events. Optional keys:
+   `everyHours` (how often it runs), `lookaheadDays`, `sendUpdates` and
+   `timeZone` (for example `"America/Los_Angeles"`, default UTC). The defaults
+   and allowed values are in `src/Code.gs`.
 
 2. Turn on the Apps Script API for that Google account at
    <https://script.google.com/home/usersettings>.
@@ -69,15 +74,27 @@ the name `work`; any name works, including an email address.
    changing `everyHours`, run `push` and then `installTrigger` again.
 
 Other commands work the same way: `npm run gas -- <name> tail-logs`, `status`,
-`create-deployment`, and so on.
+`create-deployment`, and so on. `login` and `logout` only manage credentials and
+need no config.
 
-- Every command first builds `accounts/<name>/build/` from `src/`, adding a
-  generated `Config.gs` with that account's settings.
+- Every other command first builds `accounts/<name>/build/` from `src/`, adding
+  a generated `Config.gs` with that account's settings. `title` only applies
+  when `create` runs; it does not rename an existing script.
 - `accounts/*` is gitignored except `accounts/example`, so addresses and script
   IDs stay out of git.
 - Logins are kept by clasp in `~/.clasprc.json`, one per name.
 - To use an existing script instead of `create`, write
   `accounts/<name>/.clasp.json` as `{"scriptId": "<id>", "rootDir": "build"}`.
+
+## Development
+
+```bash
+npm test               # runs src/Code.gs against mocked Apps Script services
+npm run format         # prettier, 80 columns
+npm run format:check
+```
+
+The manifest pins the OAuth scopes to `calendar.events` and `script.scriptapp`.
 
 ## Changelog
 

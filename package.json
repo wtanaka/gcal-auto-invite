@@ -7,7 +7,8 @@
   "scripts": {
     "gas": "node scripts/gas.mjs",
     "format": "prettier --write .",
-    "format:check": "prettier --check ."
+    "format:check": "prettier --check .",
+    "test": "node --test"
   },
   "devDependencies": {
     "@google/clasp": "3.4.1",

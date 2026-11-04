@@ -1,5 +1,4 @@
 {
-  "me": "you@example.com",
   "invitees": ["other-address@example.org"],
   "title": "gcal-auto-invite"
 }
