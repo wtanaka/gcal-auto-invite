@@ -7,7 +7,7 @@ import vm from "node:vm";
 const source = readFileSync(new URL("../src/Code.gs", import.meta.url), "utf8");
 
 function load(overrides = {}) {
-  const calls = { list: [], patch: [] };
+  const calls = { list: [], get: [], patch: [] };
   const sandbox = {
     CONFIG: { invitees: ["Other@Example.org"] },
     console: { log() {}, error() {} },
@@ -17,9 +17,17 @@ function load(overrides = {}) {
           calls.list.push(args);
           return overrides.pages?.[calls.list.length - 1] ?? { items: [] };
         },
+        get: (calendarId, id) => {
+          calls.get.push(id);
+          return overrides.masters?.[id];
+        },
         patch: (resource, calendarId, id, args) => {
           calls.patch.push({ resource, id, args });
           if (overrides.failIds?.includes(id)) throw new Error("403");
+          // Like Google, return the updated event (or drop the change).
+          return overrides.dropIds?.includes(id)
+            ? { id, attendees: [] }
+            : { id, attendees: resource.attendees };
         },
       },
     },
@@ -61,11 +69,29 @@ test("filter keeps only regular events missing an invitee", () => {
     event("lacks", { attendees: [{ email: "x@y.z" }] }),
     event("birthday", { eventType: "birthday" }),
     event("explicit-default", { eventType: "default" }),
+    event("guest-no-invite", {
+      organizer: { email: "o@x.y" },
+      guestsCanInviteOthers: false,
+    }),
+    event("guest-can-invite", { organizer: { email: "o@x.y" } }),
+    event("partial-list", { attendeesOmitted: true }),
+    event("guests-can-modify", {
+      organizer: { email: "o@x.y" },
+      guestsCanModify: true,
+    }),
+    event("mine", { organizer: { email: "me@x.y", self: true } }),
   ];
   const ids = sandbox
     .filterToEventsMissingInvitee(invitees, events)
     .map((e) => e.id);
-  assert.deepEqual(ids, ["none", "lacks", "explicit-default"]);
+  assert.deepEqual(plain(ids), [
+    "none",
+    "lacks",
+    "explicit-default",
+    "guest-can-invite",
+    "guests-can-modify",
+    "mine",
+  ]);
 });
 
 test("addInvitee keeps existing attendees and sets sendUpdates", () => {
@@ -123,4 +149,73 @@ test("addOtherEmailInvites skips when another run holds the lock", () => {
   const { sandbox, calls } = load({ locked: true });
   sandbox.addOtherEmailInvites();
   assert.equal(calls.list.length, 0);
+});
+
+test("a patch that Google accepts but does not apply is a failure", () => {
+  const { sandbox } = load({ dropIds: ["ghost"] });
+  const failures = sandbox.addInvitee(
+    "primary",
+    ["other@example.org"],
+    [event("ghost"), event("real")],
+    "none",
+  );
+  assert.deepEqual(plain(failures.map((f) => f.id)), ["ghost"]);
+  assert.match(failures[0].error, /still lacks other@example.org/);
+});
+
+test("instances of a recurring event update the series once", () => {
+  const { sandbox, calls } = load({
+    masters: { series: { id: "series", summary: "Weekly" } },
+  });
+  const failures = sandbox.addInvitee(
+    "primary",
+    ["other@example.org"],
+    [
+      event("i1", { recurringEventId: "series" }),
+      event("i2", { recurringEventId: "series" }),
+      event("single"),
+    ],
+    "none",
+  );
+  assert.equal(failures.length, 0);
+  assert.deepEqual(plain(calls.patch.map((p) => p.id)), ["series", "single"]);
+  assert.deepEqual(plain(calls.get), ["series"]);
+});
+
+test("an instance is patched alone if its series has the invitee", () => {
+  const { sandbox, calls } = load({
+    masters: {
+      series: { id: "series", attendees: [{ email: "other@example.org" }] },
+    },
+  });
+  sandbox.addInvitee(
+    "primary",
+    ["other@example.org"],
+    [
+      event("i1", {
+        recurringEventId: "series",
+        attendees: [{ email: "x@y.z" }],
+      }),
+    ],
+    "none",
+  );
+  assert.deepEqual(plain(calls.patch.map((p) => p.id)), ["i1"]);
+});
+
+test("a series that cannot be updated fails once, not per instance", () => {
+  const { sandbox, calls } = load({
+    masters: { series: { id: "series" } },
+    failIds: ["series"],
+  });
+  const failures = sandbox.addInvitee(
+    "primary",
+    ["other@example.org"],
+    [
+      event("i1", { recurringEventId: "series" }),
+      event("i2", { recurringEventId: "series" }),
+    ],
+    "none",
+  );
+  assert.equal(failures.length, 1);
+  assert.equal(calls.patch.length, 1);
 });

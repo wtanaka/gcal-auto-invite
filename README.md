@@ -13,6 +13,13 @@ calendar to a second address.
 - Skips events whose attendee list exists but is empty.
 - Patches in only the addresses that are missing (compared case-insensitively),
   keeping existing attendees.
+- For a recurring event, the invitees are added to the whole series once, so
+  every instance (including future ones) gets them. A single instance is only
+  patched on its own when its series already has the invitees.
+- Events you only attend are updated when the organizer lets guests invite
+  others (Google's default) or modify the event. Otherwise, and when Google
+  omits part of the guest list, they are skipped and logged, since patching a
+  partial list could drop guests.
 - If an event cannot be updated (for example one you may not modify), the run
   carries on with the rest and then fails, so Apps Script reports it.
 - Overlapping runs are skipped.

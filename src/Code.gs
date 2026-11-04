@@ -57,10 +57,34 @@ function getMissingInvitees(inviteeEmails, event) {
   );
 }
 
+// Why you cannot change the guest list of this event, or "" if you can try: you
+// organize it, it lets guests modify it, or it lets guests invite others (the
+// default). A guest who cannot see every guest only has a partial list, and
+// patching with it could drop the other guests.
+function whyCannotChangeGuests(event) {
+  if (event.attendeesOmitted) {
+    return "Google omitted part of the guest list";
+  }
+  var isOrganizer = !event.organizer || event.organizer.self;
+  if (
+    !isOrganizer &&
+    !event.guestsCanModify &&
+    event.guestsCanInviteOthers === false
+  ) {
+    return "the organizer does not let guests invite others";
+  }
+  return "";
+}
+
 function filterToEventsMissingInvitee(inviteeEmails, events) {
   return events.filter((event) => {
     // Only regular events; skip birthdays, fromGmail, focus time, etc.
     if (event.eventType && event.eventType !== "default") {
+      return false;
+    } else if (whyCannotChangeGuests(event)) {
+      console.log(
+        "skipping " + event.summary + ": " + whyCannotChangeGuests(event),
+      );
       return false;
     } else if (!event.attendees) {
       return true;
@@ -72,26 +96,85 @@ function filterToEventsMissingInvitee(inviteeEmails, events) {
   });
 }
 
-// Adds the missing invitees to each event. One event failing (for example one
-// you are not allowed to modify) does not stop the rest. Returns the failures.
+// Patches the missing invitees onto one event and checks that Google applied
+// them (it can accept a patch without applying it).
+function patchInvitees(calendarId, event, missingEmails, sendUpdates) {
+  console.log(
+    "adding " +
+      missingEmails.join(", ") +
+      " to " +
+      event.summary +
+      " (id " +
+      event.id +
+      ", type " +
+      event.eventType +
+      ", organizer " +
+      (event.organizer && event.organizer.email) +
+      ", guestsCanInviteOthers " +
+      event.guestsCanInviteOthers +
+      ", guestsCanModify " +
+      event.guestsCanModify +
+      ", guestsCanSeeOtherGuests " +
+      event.guestsCanSeeOtherGuests +
+      ")",
+  );
+  var newAttendees = (event.attendees || []).concat(
+    missingEmails.map((email) => ({ email: email })),
+  );
+  var updated = Calendar.Events.patch(
+    { attendees: newAttendees },
+    calendarId,
+    event.id,
+    { sendUpdates: sendUpdates },
+  );
+  var stillMissing = getMissingInvitees(missingEmails, updated || {});
+  if (stillMissing.length > 0) {
+    throw new Error(
+      "Google accepted the change but the event still lacks " +
+        stillMissing.join(", ") +
+        "; attendees now: " +
+        ((updated && updated.attendees) || []).map((a) => a.email).join(", "),
+    );
+  }
+}
+
+// Adds the missing invitees to each event. For an instance of a recurring
+// event the series itself is updated (once), so every instance, including
+// future ones, gets the invitees; an instance is only patched on its own when
+// the series already has them. One event failing (for example one you are not
+// allowed to modify) does not stop the rest. Returns the failures.
 function addInvitee(calendarId, inviteeEmails, events, sendUpdates) {
   var failures = [];
+  var masters = {}; // series id -> recurring event, once fetched
+  var done = {}; // series ids already updated or already failed
   events.forEach((event) => {
-    var missingEmails = getMissingInvitees(inviteeEmails, event);
-    if (missingEmails.length == 0) {
-      return;
-    }
-    console.log("adding " + missingEmails.join(", ") + " to " + event.summary);
-    var newAttendees = (event.attendees || []).concat(
-      missingEmails.map((email) => ({ email: email })),
-    );
+    var seriesId = event.recurringEventId;
     try {
-      Calendar.Events.patch({ attendees: newAttendees }, calendarId, event.id, {
-        sendUpdates: sendUpdates,
-      });
+      if (seriesId && done[seriesId]) {
+        return;
+      }
+      var target = event;
+      if (seriesId) {
+        masters[seriesId] =
+          masters[seriesId] || Calendar.Events.get(calendarId, seriesId);
+        if (getMissingInvitees(inviteeEmails, masters[seriesId]).length > 0) {
+          target = masters[seriesId];
+        }
+      }
+      var missingEmails = getMissingInvitees(inviteeEmails, target);
+      if (missingEmails.length == 0) {
+        return;
+      }
+      patchInvitees(calendarId, target, missingEmails, sendUpdates);
+      if (target !== event) {
+        done[seriesId] = true;
+      }
     } catch (e) {
       console.error("could not update " + event.summary + ": " + e);
       failures.push({ id: event.id, summary: event.summary, error: String(e) });
+      if (seriesId) {
+        done[seriesId] = true; // do not retry the series for every instance
+      }
     }
   });
   return failures;
